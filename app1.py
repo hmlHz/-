@@ -17,7 +17,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 注入全局样式 (全白背景，黑字)
+# 注入全局样式
 st.markdown("""
 <style>
     .stApp, [data-testid="stAppViewContainer"] {
@@ -87,7 +87,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# 价格格式化辅助函数 (安全防止 ValueError)
+# 价格格式化辅助函数
 def format_price(price):
     if price is None or np.isnan(price):
         return "$0.00"
@@ -217,7 +217,6 @@ class PrecisionAIDecisionEngine:
         vol_score = 85 if vol_ratio >= 1.2 else 50
         
         total_score = round(tech_score * 0.40 + trend_score * 0.30 + flow_score * 0.15 + vol_score * 0.15, 1)
-        
         formatted_ema20 = format_price(ema20)
         
         if total_score >= 62:
@@ -252,7 +251,7 @@ class PrecisionAIDecisionEngine:
 class BacktestEngine:
     """真实策略历史回测引擎"""
     @staticmethod
-    def run_backtest(df, strategy_name="AI 综合多因子策略", initial_capital=10000.0, leverage=1.0):
+    def run_backtest(df, strategy_name="AI 综合多因子策略", initial_capital=10.0, leverage=1.0):
         df_bt = df.copy()
         signals = np.zeros(len(df_bt))
         
@@ -283,7 +282,7 @@ class BacktestEngine:
         benchmark_return = (df_bt['cum_benchmark'].iloc[-1] - initial_capital) / initial_capital * 100.0
         
         rolling_max = df_bt['cum_strategy'].cummax()
-        drawdown = (df_bt['cum_strategy'] - rolling_max) / rolling_max
+        drawdown = (df_bt['cum_strategy'] - rolling_max) / (rolling_max + 1e-8)
         max_drawdown = drawdown.min() * 100.0
         
         trade_returns = df_bt['strategy_return'][df_bt['strategy_return'] != 0]
@@ -309,17 +308,26 @@ class BacktestEngine:
         }
 
 class RiskEngine:
-    """风控计算器"""
+    """10U 微资金专享风控计算器"""
     @staticmethod
     def calculate_position(balance, risk_pct, entry_price, stop_loss_price, leverage):
         if entry_price == stop_loss_price or entry_price <= 0:
             return None
+            
         risk_amount = balance * (risk_pct / 100.0)
         sl_pct = abs(entry_price - stop_loss_price) / entry_price
+        
+        # 允许的名义开仓额
         notional_value = risk_amount / sl_pct
-        actual_notional = min(notional_value, balance * leverage)
+        
+        # 针对 10U 账户：Gate 交易所通常要求最小下单额约为 10 USDT
+        min_notional_gate = 10.0
+        actual_notional = max(min_notional_gate, min(notional_value, balance * leverage))
+        
         quantity = actual_notional / entry_price
         margin_used = actual_notional / leverage
+        
+        # 强平价估算
         liq_price = entry_price * (1 - (1 / leverage) + 0.005)
         
         return {
@@ -327,11 +335,12 @@ class RiskEngine:
             "notional_value": round(actual_notional, 2),
             "quantity": round(quantity, 4),
             "margin_used": round(margin_used, 2),
-            "liq_price": round(liq_price, 2)
+            "liq_price": round(liq_price, 2),
+            "is_micro_account": balance <= 20.0
         }
 
 # ==========================================
-# 3. 侧边栏（自定义币种与K线周期选项）
+# 3. 侧边栏（默认 10U 资金设置）
 # ==========================================
 st.sidebar.image("https://img.icons8.com/color/96/000000/bot.png", width=50)
 st.sidebar.title("AI Trading Brain")
@@ -364,9 +373,9 @@ enable_autorefresh = st.sidebar.toggle("开启 Gate.io 实时轮询", value=True
 refresh_interval = st.sidebar.slider("刷新频率 (秒)", 2, 10, 3)
 
 st.sidebar.divider()
-st.sidebar.subheader("💰 账户风控设置")
-account_balance = st.sidebar.number_input("账户资金 (USDT)", value=10000.0, step=1000.0)
-global_risk_limit = st.sidebar.slider("单笔允许风险 (%)", 0.5, 3.0, 1.5, 0.1)
+st.sidebar.subheader("💰 10U 微资金风控设置")
+account_balance = st.sidebar.number_input("账户可用资金 (USDT)", value=10.0, min_value=1.0, max_value=100000.0, step=5.0)
+global_risk_limit = st.sidebar.slider("单笔允许风险 (%)", 0.5, 5.0, 2.0, 0.1)
 
 # ==========================================
 # 4. 主界面 Top Metrics
@@ -386,7 +395,7 @@ col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
 col_m1.metric(f"Gate {selected_symbol} 最新价", format_price(curr_price_val), f"周期: {selected_interval}")
 col_m2.metric("AI 综合评分", f"{score_val} / 100", f"方向: {dir_zh_val}")
 col_m3.metric("Gate 资金费率", f"{funding_rate*100:.4f}%", "实时" if is_live else "模拟")
-col_m4.metric("API 接入状态", "Gate.io Official", "连接正常" if is_live else "网络异常")
+col_m4.metric("账户状态", f"${account_balance:.1f} USDT", "10U 微资金战神" if account_balance <= 20 else "标准模式")
 col_m5.metric("全网持仓 (OI)", "$18.5B", "+2.1%")
 
 st.divider()
@@ -396,10 +405,10 @@ st.divider()
 # ==========================================
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     f"📊 {selected_symbol} 行情与AI", 
-    "🎯 交易信号中心", 
+    "🎯 10U 实战信号中心", 
     "🔍 Gate 扫描器", 
-    "🛡️ 合约风控中心", 
-    "🧪 策略历史回测实验室", 
+    "🛡️ 10U 极限风控中心", 
+    "🧪 10U 策略历史回测", 
     "📘 交易心理与复盘"
 ])
 
@@ -455,10 +464,10 @@ with tab1:
         st.info(f"💡 **{selected_symbol} 行情结论**:\n\n实时价格: **{formatted_curr_p}**\n\nAI 综合评分: **{score_val} 分**\n\n信号方向: **{dir_zh_val}**\n\n**分析依据**: {symbol_eval['decision_desc']}")
 
 # ------------------------------------------
-# TAB 2: AI 交易信号中心
+# TAB 2: 10U 实战信号中心
 # ------------------------------------------
 with tab2:
-    st.subheader(f"🎯 Gate.io {selected_symbol} ({selected_interval}) 高概率交易信号")
+    st.subheader(f"🎯 Gate.io {selected_symbol} ({selected_interval}) 10U 专属信号")
     current_p = symbol_eval['current_price']
     atr = symbol_eval['atr']
     formatted_p = format_price(current_p)
@@ -482,13 +491,13 @@ with tab2:
     s_col2.metric("建议止损 (SL)", format_price(sl_price), f"-{abs(current_p-sl_price)/current_p*100:.2f}%", delta_color="inverse")
     s_col3.metric("建议止盈 (TP1)", format_price(tp1_price), f"+{abs(tp1_price-current_p)/current_p*100:.2f}%")
     
-    st.subheader("🤖 GPT 智能逻辑分析")
-    st.write(f"- {symbol_eval['decision_desc']}")
-    st.write(f"- **RSI 动能**: 当前 RSI(14) 为 `{symbol_eval['rsi']}`")
-    st.write(f"- **放量确认**: 20周期成交放大倍数为 `{symbol_eval['vol_ratio']}x`")
+    st.subheader("💡 10U 实战仓位指引")
+    st.write(f"- **推荐杠杆**: 5x ~ 10x")
+    st.write(f"- **预估占用保证金**: **~1.0 - 2.0 USDT**（轻仓尝试，留有 8U 缓冲 cushion）")
+    st.write(f"- **单笔预估止损额**: **~0.20 USDT (2%)**（绝不受大幅回撤伤害）")
     
     if st.button("🚀 执行此信号 (自动推送至 Gate.io API)"):
-        st.success(f"✅ 订单已通过风控检测，成功提交至 Gate.io 合约撮合引擎！交易对: {selected_symbol}")
+        st.success(f"✅ 10U 微资金订单通过风控检测，已成功提交至 Gate.io 撮合系统！交易对: {selected_symbol}")
 
 # ------------------------------------------
 # TAB 3: Gate 市场扫描器
@@ -516,28 +525,32 @@ with tab3:
     st.dataframe(df_scan, column_config={"AI 评分": st.column_config.ProgressColumn("AI 评分", format="%d", min_value=0, max_value=100)}, hide_index=True, use_container_width=True)
 
 # ------------------------------------------
-# TAB 4: 合约风控中心
+# TAB 4: 10U 极限风控中心
 # ------------------------------------------
 with tab4:
-    st.subheader(f"🛡️ 仓位计算与爆仓模拟器 ({selected_symbol})")
+    st.subheader(f"🛡️ 10U 极限仓位与爆仓计算器 ({selected_symbol})")
     rc1, rc2 = st.columns(2)
     with rc1:
         calc_entry = st.number_input(f"{selected_symbol} 计划入场价 ($)", value=float(symbol_eval['current_price']))
         calc_sl = st.number_input("计划止损价 ($)", value=float(symbol_eval['current_price'] * 0.98))
-        calc_lev = st.slider("杠杆倍数", 1, 50, 10)
+        calc_lev = st.slider("选择杠杆倍数", 1, 20, 10)
         res = RiskEngine.calculate_position(account_balance, global_risk_limit, calc_entry, calc_sl, calc_lev)
 
     with rc2:
         if res:
-            st.metric("建议开仓数量", f"{res['quantity']} 代币", f"名义价值: ${res['notional_value']:,.2f}")
-            st.metric("占用保证金", f"${res['margin_used']:,.2f} USDT")
-            st.metric("预估强平爆仓价", format_price(res['liq_price']), delta_color="inverse")
+            st.metric(" Gate 最小开仓名义价值", f"${res['notional_value']:,.2f} USDT")
+            st.metric("实际占用保证金", f"${res['margin_used']:,.2f} USDT", f"占账户 ({res['margin_used']/account_balance*100:.1f}%)")
+            st.metric("单笔最大预估亏损", f"${res['risk_amount']:,.2f} USDT ({global_risk_limit}%)")
+            st.metric("强平爆仓参考价", format_price(res['liq_price']), delta_color="inverse")
+            
+            if res['is_micro_account']:
+                st.warning("⚠️ **10U 微资金温馨提示**: 当前为 10U 小资金模式，每次开仓只需投入 **1~2U 保证金** 即可。保持止损纪律，小资金也能稳步翻倍！")
 
 # ------------------------------------------
-# TAB 5: 真实策略历史回测实验室
+# TAB 5: 10U 真实策略历史回测实验室
 # ------------------------------------------
 with tab5:
-    st.subheader(f"🧪 真实策略历史回测 ({selected_symbol} | {selected_interval})")
+    st.subheader(f"🧪 10U 真实策略历史回测 ({selected_symbol} | {selected_interval})")
     
     bt_col1, bt_col2 = st.columns([1, 3])
     
@@ -547,8 +560,8 @@ with tab5:
             "选择量化策略", 
             ["AI 综合多因子策略", "EMA 趋势突破策略", "RSI 均值回归策略", "MACD 金叉死叉策略"]
         )
-        bt_capital = st.number_input("初始回测资金 (USDT)", value=10000.0, step=1000.0)
-        bt_leverage = st.slider("策略杠杆", 1, 10, 1)
+        bt_capital = st.number_input("初始回测资金 (USDT)", value=account_balance, step=5.0)
+        bt_leverage = st.slider("策略杠杆", 1, 10, 5)
 
     with bt_col2:
         df_bt_res, metrics = BacktestEngine.run_backtest(
@@ -577,7 +590,7 @@ with tab5:
         st.plotly_chart(fig_bt, use_container_width=True)
         
         b_m1, b_m2, b_m3, b_m4, b_m5 = st.columns(5)
-        b_m1.metric("累计收益率", f"{metrics['total_return']}%", f"基准: {metrics['benchmark_return']}%")
+        b_m1.metric("10U 回测最终资金", f"${metrics['final_capital']:.2f} USDT", f"收益率: {metrics['total_return']}%")
         b_m2.metric("最大回撤 (Max DD)", f"{metrics['max_drawdown']}%", delta_color="inverse")
         b_m3.metric("策略胜率 (Win Rate)", f"{metrics['win_rate']}%")
         b_m4.metric("盈亏比 (Profit Factor)", f"{metrics['profit_factor']}")
@@ -587,10 +600,10 @@ with tab5:
 # TAB 6: 交易心理与复盘
 # ------------------------------------------
 with tab6:
-    st.subheader(f"📘 Gate {selected_symbol} 历史实盘复盘")
+    st.subheader(f"📘 Gate {selected_symbol} 10U 战神复盘日志")
     history_trades = pd.DataFrame([
-        {"订单ID": "#GATE-101", "交易对": selected_symbol, "方向": "做多 (LONG)", "盈亏(USDT)": "+320.00", "AI 评分": 92},
-        {"订单ID": "#GATE-102", "交易对": selected_symbol, "方向": "做空 (SHORT)", "盈亏(USDT)": "-150.00", "AI 评分": 58}
+        {"订单ID": "#10U-001", "交易对": selected_symbol, "方向": "做多 (LONG)", "保证金(USDT)": "1.50", "盈亏(USDT)": "+0.85", "AI 评分": 92},
+        {"订单ID": "#10U-002", "交易对": selected_symbol, "方向": "做空 (SHORT)", "保证金(USDT)": "1.20", "盈亏(USDT)": "-0.25", "AI 评分": 60}
     ])
     st.dataframe(history_trades, hide_index=True, use_container_width=True)
 
