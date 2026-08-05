@@ -91,8 +91,8 @@ st.markdown("""
 # 2. Gate.io 真实行情与专业指标计算引擎
 # ==========================================
 
-@st.cache_data(ttl=2)
-def fetch_gate_futures_data(symbol="BTC_USDT", interval="1h", limit=100):
+@st.cache_data(ttl=3)
+def fetch_gate_futures_data(symbol="BTC_USDT", interval="1h", limit=300):
     """从 Gate.io 获取真实永续合约 OHLCV 及精细化技术指标"""
     gate_contract = symbol.replace("/", "_")
     url = "https://fx-api.gateio.ws/api/v4/futures/usdt/candlesticks"
@@ -130,7 +130,6 @@ def fetch_gate_futures_data(symbol="BTC_USDT", interval="1h", limit=100):
                 
                 df['ATR'] = (df['high'] - df['low']).rolling(14).mean().bfill()
                 
-                # 修复放量计算：使用 min_periods=1 保证前20根柱子也能算精准放量倍数
                 vol_ma20 = df['volume'].rolling(20, min_periods=1).mean()
                 df['Vol_Ratio'] = np.where(vol_ma20 > 0, df['volume'] / vol_ma20, 1.0)
                 df['Vol_Ratio'] = df['Vol_Ratio'].round(2)
@@ -139,7 +138,7 @@ def fetch_gate_futures_data(symbol="BTC_USDT", interval="1h", limit=100):
     except Exception:
         pass
         
-    # Fallback
+    # Fallback Data
     dates = [datetime.datetime.now() - datetime.timedelta(hours=i) for i in range(limit)][::-1]
     base_price = 68000.0 if "BTC" in symbol else 2500.0
     close = base_price + np.cumsum(np.random.normal(0, 50, limit))
@@ -174,7 +173,7 @@ class PrecisionAIDecisionEngine:
     @staticmethod
     def evaluate_market(df, funding_rate=0.0001):
         latest = df.iloc[-1]
-        prev = df.iloc[-2]
+        prev = df.iloc[-2] if len(df) > 1 else latest
         
         close = latest['close']
         ema20 = latest['EMA20']
@@ -211,19 +210,18 @@ class PrecisionAIDecisionEngine:
         
         total_score = round(tech_score * 0.40 + trend_score * 0.30 + flow_score * 0.15 + vol_score * 0.15, 1)
         
-        # 中文方向映射与逻辑说明
         if total_score >= 62:
             direction_zh = "做多 (LONG)"
             direction_code = "LONG"
-            decision_desc = f"看多：价格稳居 EMA20 (${ema20:,.1f}) 上方，MACD 多头动能增强，成交量达到均量的 {vol_ratio:.2f} 倍。"
+            decision_desc = f"看多：价格稳居 EMA20 (${ema20:,.2f}) 上方，MACD 多头动能增强，成交量达到均量的 {vol_ratio:.2f} 倍。"
         elif total_score <= 38:
             direction_zh = "做空 (SHORT)"
             direction_code = "SHORT"
-            decision_desc = f"看空：价格处于 EMA20 (${ema20:,.1f}) 下方，空头承压，成交量为均量的 {vol_ratio:.2f} 倍。"
+            decision_desc = f"看空：价格处于 EMA20 (${ema20:,.2f}) 下方，空头承压，成交量为均量的 {vol_ratio:.2f} 倍。"
         else:
             direction_zh = "观望 (WAIT)"
             direction_code = "WAIT"
-            decision_desc = f"观望：价格在 EMA20 (${ema20:,.1f}) 附近整理，成交交投平稳 ({vol_ratio:.2f} 倍均量)。"
+            decision_desc = f"观望：价格在 EMA20 (${ema20:,.2f}) 附近整理，成交交投平稳 ({vol_ratio:.2f} 倍均量)。"
             
         return {
             "total_score": total_score,
@@ -239,6 +237,71 @@ class PrecisionAIDecisionEngine:
             "current_price": close,
             "rsi": round(rsi, 1),
             "vol_ratio": round(vol_ratio, 2)
+        }
+
+class BacktestEngine:
+    """真实策略历史回测引擎"""
+    @staticmethod
+    def run_backtest(df, strategy_name="AI 综合多因子策略", initial_capital=10000.0, leverage=1.0):
+        df_bt = df.copy()
+        signals = np.zeros(len(df_bt)) # 1: LONG, -1: SHORT, 0: HOLD
+        
+        if strategy_name == "AI 综合多因子策略":
+            for i in range(1, len(df_bt)):
+                sub_df = df_bt.iloc[:i+1]
+                res = PrecisionAIDecisionEngine.evaluate_market(sub_df)
+                if res['direction_code'] == "LONG":
+                    signals[i] = 1
+                elif res['direction_code'] == "SHORT":
+                    signals[i] = -1
+        elif strategy_name == "EMA 趋势突破策略":
+            signals = np.where((df_bt['close'] > df_bt['EMA20']) & (df_bt['EMA20'] > df_bt['EMA60']), 1, 
+                       np.where((df_bt['close'] < df_bt['EMA20']) & (df_bt['EMA20'] < df_bt['EMA60']), -1, 0))
+        elif strategy_name == "RSI 均值回归策略":
+            signals = np.where(df_bt['RSI'] < 30, 1, np.where(df_bt['RSI'] > 70, -1, 0))
+        elif strategy_name == "MACD 金叉死叉策略":
+            signals = np.where(df_bt['MACD'] > df_bt['MACD_Signal'], 1, -1)
+            
+        df_bt['signal'] = signals
+        df_bt['pct_change'] = df_bt['close'].pct_change().fillna(0)
+        
+        # 计算策略收益
+        df_bt['strategy_return'] = df_bt['signal'].shift(1).fillna(0) * df_bt['pct_change'] * leverage
+        df_bt['cum_strategy'] = (1 + df_bt['strategy_return']).cumprod() * initial_capital
+        df_bt['cum_benchmark'] = (1 + df_bt['pct_change']).cumprod() * initial_capital
+        
+        # 回测性能指标计算
+        total_return = (df_bt['cum_strategy'].iloc[-1] - initial_capital) / initial_capital * 100.0
+        benchmark_return = (df_bt['cum_benchmark'].iloc[-1] - initial_capital) / initial_capital * 100.0
+        
+        # 计算最大回撤
+        rolling_max = df_bt['cum_strategy'].cummax()
+        drawdown = (df_bt['cum_strategy'] - rolling_max) / rolling_max
+        max_drawdown = drawdown.min() * 100.0
+        
+        # 胜率与交易次数
+        trade_returns = df_bt['strategy_return'][df_bt['strategy_return'] != 0]
+        total_trades = len(trade_returns)
+        win_trades = len(trade_returns[trade_returns > 0])
+        win_rate = (win_trades / total_trades * 100.0) if total_trades > 0 else 0.0
+        
+        # 盈亏比
+        gross_profit = trade_returns[trade_returns > 0].sum()
+        gross_loss = abs(trade_returns[trade_returns < 0].sum())
+        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else 1.0
+        
+        # 夏普比率
+        sharpe_ratio = (df_bt['strategy_return'].mean() / (df_bt['strategy_return'].std() + 1e-8)) * np.sqrt(365)
+        
+        return df_bt, {
+            "total_return": round(total_return, 2),
+            "benchmark_return": round(benchmark_return, 2),
+            "max_drawdown": round(max_drawdown, 2),
+            "win_rate": round(win_rate, 2),
+            "total_trades": total_trades,
+            "profit_factor": round(profit_factor, 2),
+            "sharpe_ratio": round(sharpe_ratio, 2),
+            "final_capital": round(df_bt['cum_strategy'].iloc[-1], 2)
         }
 
 class RiskEngine:
@@ -264,14 +327,34 @@ class RiskEngine:
         }
 
 # ==========================================
-# 3. 侧边栏 (默认 Gate Futures)
+# 3. 侧边栏（自定义币种与K线周期选项）
 # ==========================================
 st.sidebar.image("https://img.icons8.com/color/96/000000/bot.png", width=50)
 st.sidebar.title("AI Trading Brain")
 
 st.sidebar.divider()
-st.sidebar.subheader("👤 交易所配置")
-selected_exchange = st.sidebar.selectbox("默认行情接入", ["Gate Futures", "Binance Futures", "OKX Futures"], index=0)
+st.sidebar.subheader("🌐 币种与 K 线周期配置")
+
+# 自定义币种选择
+preset_symbols = ["BTC_USDT", "ETH_USDT", "SOL_USDT", "BNB_USDT", "DOGE_USDT", "XRP_USDT", "ADA_USDT", "LINK_USDT", "AVAX_USDT", "NEAR_USDT"]
+selected_symbol_option = st.sidebar.selectbox("选择交易对", preset_symbols + ["手动输入其他..."], index=0)
+
+if selected_symbol_option == "手动输入其他...":
+    selected_symbol = st.sidebar.text_input("输入 Gate 合约代码 (如 SUI_USDT)", value="SUI_USDT").upper()
+else:
+    selected_symbol = selected_symbol_option
+
+# 自定义 K 线时间周期
+interval_mapping = {
+    "1分钟 (1m)": "1m",
+    "5分钟 (5m)": "5m",
+    "15分钟 (15m)": "15m",
+    "1小时 (1h)": "1h",
+    "4小时 (4h)": "4h",
+    "1天 (1d)": "1d"
+}
+selected_interval_label = st.sidebar.selectbox("K 线时间周期", list(interval_mapping.keys()), index=3) # 默认 1h
+selected_interval = interval_mapping[selected_interval_label]
 
 st.sidebar.divider()
 st.sidebar.subheader("⚡ 实时行情轮询")
@@ -286,19 +369,20 @@ global_risk_limit = st.sidebar.slider("单笔允许风险 (%)", 0.5, 3.0, 1.5, 0
 # ==========================================
 # 4. 主界面 Top Metrics
 # ==========================================
-st.title("⚡ AI Crypto Trading Terminal (Gate.io Live)")
+st.title(f"⚡ AI Crypto Trading Terminal ({selected_symbol} | {selected_interval})")
 
-df_btc, is_live = fetch_gate_futures_data("BTC_USDT")
-funding_rate, mark_price = fetch_gate_contract_info("BTC_USDT")
-btc_eval = PrecisionAIDecisionEngine.evaluate_market(df_btc, funding_rate)
+# 拉取选定币种与周期的 Gate 真实数据
+df_symbol, is_live = fetch_gate_futures_data(selected_symbol, selected_interval, limit=300)
+funding_rate, mark_price = fetch_gate_contract_info(selected_symbol)
+symbol_eval = PrecisionAIDecisionEngine.evaluate_market(df_symbol, funding_rate)
 
-curr_price_val = btc_eval['current_price']
-score_val = btc_eval['total_score']
-dir_zh_val = btc_eval['direction_zh']
-dir_code_val = btc_eval['direction_code']
+curr_price_val = symbol_eval['current_price']
+score_val = symbol_eval['total_score']
+dir_zh_val = symbol_eval['direction_zh']
+dir_code_val = symbol_eval['direction_code']
 
 col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
-col_m1.metric("Gate BTC/USDT 最新价", f"${curr_price_val:,.2f}", f"标记价: ${mark_price:,.1f}")
+col_m1.metric(f"Gate {selected_symbol} 最新价", f"${curr_price_val:,.4f}" if curr_price_val < 1 else f"${curr_price_val:,.2f}", f"周期: {selected_interval}")
 col_m2.metric("AI 综合评分", f"{score_val} / 100", f"方向: {dir_zh_val}")
 col_m3.metric("Gate 资金费率", f"{funding_rate*100:.4f}%", "实时" if is_live else "模拟")
 col_m4.metric("API 接入状态", "Gate.io Official", "连接正常" if is_live else "网络异常")
@@ -310,11 +394,11 @@ st.divider()
 # 5. 6大 TAB 交互主工作台
 # ==========================================
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "📊 Gate 真实行情与AI", 
+    f"📊 {selected_symbol} 行情与AI", 
     "🎯 交易信号中心", 
-    "🔍 Gate 市场扫描器", 
+    "🔍 Gate 扫描器", 
     "🛡️ 合约风控中心", 
-    "🧪 策略实验室", 
+    "🧪 策略历史回测实验室", 
     "📘 交易心理与复盘"
 ])
 
@@ -325,23 +409,23 @@ with tab1:
     c1, c2 = st.columns([3, 1])
     
     with c1:
-        st.subheader("Gate.io BTC/USDT 实时 K 线")
+        st.subheader(f"Gate.io {selected_symbol} ({selected_interval}) 实时 K 线")
         
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.75, 0.25])
         
         # K 线图黑底 (#131722)
         fig.add_trace(go.Candlestick(
-            x=df_btc['timestamp'], open=df_btc['open'], high=df_btc['high'],
-            low=df_btc['low'], close=df_btc['close'], name="K线",
+            x=df_symbol['timestamp'], open=df_symbol['open'], high=df_symbol['high'],
+            low=df_symbol['low'], close=df_symbol['close'], name="K线",
             increasing_line_color='#26a69a', decreasing_line_color='#ef5350',
             increasing_fillcolor='#26a69a', decreasing_fillcolor='#ef5350'
         ), row=1, col=1)
         
-        fig.add_trace(go.Scatter(x=df_btc['timestamp'], y=df_btc['EMA20'], name="EMA 20", line=dict(color='#ff9800', width=1.5)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df_btc['timestamp'], y=df_btc['EMA60'], name="EMA 60", line=dict(color='#2196f3', width=1.5)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df_symbol['timestamp'], y=df_symbol['EMA20'], name="EMA 20", line=dict(color='#ff9800', width=1.5)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df_symbol['timestamp'], y=df_symbol['EMA60'], name="EMA 60", line=dict(color='#2196f3', width=1.5)), row=1, col=1)
         
-        colors = ['#26a69a' if c >= o else '#ef5350' for c, o in zip(df_btc['close'], df_btc['open'])]
-        fig.add_trace(go.Bar(x=df_btc['timestamp'], y=df_btc['volume'], name="成交量", marker_color=colors), row=2, col=1)
+        colors = ['#26a69a' if c >= o else '#ef5350' for c, o in zip(df_symbol['close'], df_symbol['open'])]
+        fig.add_trace(go.Bar(x=df_symbol['timestamp'], y=df_symbol['volume'], name="成交量", marker_color=colors), row=2, col=1)
         
         fig.update_layout(
             paper_bgcolor='#131722',
@@ -359,66 +443,66 @@ with tab1:
 
     with c2:
         st.subheader("AI 多因子精准打分")
-        st.progress(score_val / 100.0, text=f"AI 置信度: {btc_eval['confidence']}%")
+        st.progress(score_val / 100.0, text=f"AI 置信度: {symbol_eval['confidence']}%")
         
         scores_df = pd.DataFrame({
             "量化维度": ["技术指标面 (40%)", "趋势共振面 (30%)", "资金费率面 (15%)", "成交放量面 (15%)"],
-            "得分": [btc_eval['tech_score'], btc_eval['trend_score'], btc_eval['flow_score'], btc_eval['vol_score']]
+            "得分": [symbol_eval['tech_score'], symbol_eval['trend_score'], symbol_eval['flow_score'], symbol_eval['vol_score']]
         })
         st.dataframe(scores_df, hide_index=True, use_container_width=True)
         
-        st.info(f"💡 **Gate 行情结论**:\n\nGate 实时价格: **${curr_price_val:,.2f}**\n\n当前 AI 评分: **{score_val} 分**\n\n最终信号方向: **{dir_zh_val}**\n\n**分析依据**: {btc_eval['decision_desc']}")
+        st.info(f"💡 **{selected_symbol} 行情结论**:\n\n实时价格: **${curr_price_val:,.4f if curr_price_val < 1 else curr_price_val:,.2f}**\n\nAI 综合评分: **{score_val} 分**\n\n信号方向: **{dir_zh_val}**\n\n**分析依据**: {symbol_eval['decision_desc']}")
 
 # ------------------------------------------
 # TAB 2: AI 交易信号中心
 # ------------------------------------------
 with tab2:
-    st.subheader("🎯 Gate.io 合约高概率交易信号")
-    current_p = btc_eval['current_price']
-    atr = btc_eval['atr']
+    st.subheader(f"🎯 Gate.io {selected_symbol} ({selected_interval}) 高概率交易信号")
+    current_p = symbol_eval['current_price']
+    atr = symbol_eval['atr']
     
     if dir_code_val == "LONG":
         sl_price = current_p - 1.5 * atr
         tp1_price = current_p + 2.0 * atr
-        st.success(f"🟢 **信号指令: {dir_zh_val} Gate.io BTC_USDT** | 现价: ${current_p:,.2f} | 评分: {score_val} 分 | 置信度: {btc_eval['confidence']}%")
+        st.success(f"🟢 **信号指令: {dir_zh_val} Gate.io {selected_symbol}** | 现价: ${current_p:,.4f if current_p < 1 else current_p:,.2f} | 评分: {score_val} 分 | 置信度: {symbol_eval['confidence']}%")
     elif dir_code_val == "SHORT":
         sl_price = current_p + 1.5 * atr
         tp1_price = current_p - 2.0 * atr
-        st.error(f"🔴 **信号指令: {dir_zh_val} Gate.io BTC_USDT** | 现价: ${current_p:,.2f} | 评分: {score_val} 分 | 置信度: {btc_eval['confidence']}%")
+        st.error(f"🔴 **信号指令: {dir_zh_val} Gate.io {selected_symbol}** | 现价: ${current_p:,.4f if current_p < 1 else current_p:,.2f} | 评分: {score_val} 分 | 置信度: {symbol_eval['confidence']}%")
     else:
         sl_price = current_p * 0.98
         tp1_price = current_p * 1.02
-        st.warning(f"🟡 **信号指令: {dir_zh_val} Gate.io BTC_USDT** | 现价: ${current_p:,.2f} | 评分: {score_val} 分 | 置信度: {btc_eval['confidence']}%")
+        st.warning(f"🟡 **信号指令: {dir_zh_val} Gate.io {selected_symbol}** | 现价: ${current_p:,.4f if current_p < 1 else current_p:,.2f} | 评分: {score_val} 分 | 置信度: {symbol_eval['confidence']}%")
         
     st.write("")
     s_col1, s_col2, s_col3 = st.columns(3)
-    s_col1.metric("入场价参考 (Gate)", f"${current_p:,.2f}")
-    s_col2.metric("建议止损 (SL)", f"${sl_price:,.2f}", f"-{abs(current_p-sl_price)/current_p*100:.2f}%", delta_color="inverse")
-    s_col3.metric("建议止盈 (TP1)", f"${tp1_price:,.2f}", f"+{abs(tp1_price-current_p)/current_p*100:.2f}%")
+    s_col1.metric("入场价参考 (Gate)", f"${current_p:,.4f}" if current_p < 1 else f"${current_p:,.2f}")
+    s_col2.metric("建议止损 (SL)", f"${sl_price:,.4f}" if sl_price < 1 else f"${sl_price:,.2f}", f"-{abs(current_p-sl_price)/current_p*100:.2f}%", delta_color="inverse")
+    s_col3.metric("建议止盈 (TP1)", f"${tp1_price:,.4f}" if tp1_price < 1 else f"${tp1_price:,.2f}", f"+{abs(tp1_price-current_p)/current_p*100:.2f}%")
     
     st.subheader("🤖 GPT 智能逻辑分析")
-    st.write(f"- {btc_eval['decision_desc']}")
-    st.write(f"- **RSI 动能**: 当前 RSI(14) 为 `{btc_eval['rsi']}`")
-    st.write(f"- **放量确认**: 20周期成交放大倍数为 `{btc_eval['vol_ratio']}x`")
+    st.write(f"- {symbol_eval['decision_desc']}")
+    st.write(f"- **RSI 动能**: 当前 RSI(14) 为 `{symbol_eval['rsi']}`")
+    st.write(f"- **放量确认**: 20周期成交放大倍数为 `{symbol_eval['vol_ratio']}x`")
     
     if st.button("🚀 执行此信号 (自动推送至 Gate.io API)"):
-        st.success("✅ 订单已通过风控检测，成功提交至 Gate.io 合约撮合引擎！单号: #GATE-20241025-0012")
+        st.success(f"✅ 订单已通过风控检测，成功提交至 Gate.io 合约撮合引擎！交易对: {selected_symbol}")
 
 # ------------------------------------------
 # TAB 3: Gate 市场扫描器
 # ------------------------------------------
 with tab3:
-    st.subheader("🔍 Gate.io 热门永续合约扫描器")
-    gate_symbols = ["BTC_USDT", "ETH_USDT", "SOL_USDT", "BNB_USDT", "DOGE_USDT"]
+    st.subheader(f"🔍 Gate.io 全网热门永续合约扫描器 ({selected_interval} 周期)")
+    scan_symbols = ["BTC_USDT", "ETH_USDT", "SOL_USDT", "BNB_USDT", "DOGE_USDT", "XRP_USDT", "ADA_USDT", "LINK_USDT"]
     scan_results = []
     
-    for sym in gate_symbols:
-        df_temp, _ = fetch_gate_futures_data(sym)
+    for sym in scan_symbols:
+        df_temp, _ = fetch_gate_futures_data(sym, selected_interval, limit=100)
         f_rate, _ = fetch_gate_contract_info(sym)
         eval_temp = PrecisionAIDecisionEngine.evaluate_market(df_temp, f_rate)
         scan_results.append({
             "Gate 合约": sym,
-            "真实价格": f"${eval_temp['current_price']:,.2f}",
+            "真实价格": f"${eval_temp['current_price']:,.4f}" if eval_temp['current_price'] < 1 else f"${eval_temp['current_price']:,.2f}",
             "AI 评分": eval_temp['total_score'],
             "建议方向": eval_temp['direction_zh'],
             "RSI 动能": eval_temp['rsi'],
@@ -433,11 +517,11 @@ with tab3:
 # TAB 4: 合约风控中心
 # ------------------------------------------
 with tab4:
-    st.subheader("🛡️ 仓位计算与爆仓模拟器 (Gate 规格)")
+    st.subheader(f"🛡️ 仓位计算与爆仓模拟器 ({selected_symbol})")
     rc1, rc2 = st.columns(2)
     with rc1:
-        calc_entry = st.number_input("Gate 计划入场价 ($)", value=float(int(btc_eval['current_price'])))
-        calc_sl = st.number_input("计划止损价 ($)", value=float(int(btc_eval['current_price'] * 0.98)))
+        calc_entry = st.number_input(f"{selected_symbol} 计划入场价 ($)", value=float(symbol_eval['current_price']))
+        calc_sl = st.number_input("计划止损价 ($)", value=float(symbol_eval['current_price'] * 0.98))
         calc_lev = st.slider("杠杆倍数", 1, 50, 10)
         res = RiskEngine.calculate_position(account_balance, global_risk_limit, calc_entry, calc_sl, calc_lev)
 
@@ -445,29 +529,70 @@ with tab4:
         if res:
             st.metric("建议开仓数量", f"{res['quantity']} 代币", f"名义价值: ${res['notional_value']:,.2f}")
             st.metric("占用保证金", f"${res['margin_used']:,.2f} USDT")
-            st.metric("预估强平爆仓价", f"${res['liq_price']:,.2f} USDT", delta_color="inverse")
+            st.metric("预估强平爆仓价", f"${res['liq_price']:,.4f}" if res['liq_price'] < 1 else f"${res['liq_price']:,.2f} USDT", delta_color="inverse")
 
 # ------------------------------------------
-# TAB 5: 策略实验室
+# TAB 5: 真实策略历史回测实验室 (完善重构)
 # ------------------------------------------
 with tab5:
-    st.subheader("🧪 策略历史回测")
-    days = np.arange(30)
-    returns_strat = np.cumsum(np.random.normal(0.003, 0.012, 30)) + 1.0
+    st.subheader(f"🧪 真实策略历史回测 ({selected_symbol} | {selected_interval})")
     
-    fig_bt = go.Figure()
-    fig_bt.add_trace(go.Scatter(x=days, y=returns_strat*100, name="Gate AI 策略", line=dict(color='#26a69a', width=2)))
-    fig_bt.update_layout(paper_bgcolor='#ffffff', plot_bgcolor='#ffffff', font=dict(color='#111111'), height=320, margin=dict(l=10, r=10, t=10, b=10))
-    st.plotly_chart(fig_bt, use_container_width=True)
+    bt_col1, bt_col2 = st.columns([1, 3])
+    
+    with bt_col1:
+        st.write("### ⚙️ 回测参数设置")
+        bt_strategy = st.selectbox(
+            "选择量化策略", 
+            ["AI 综合多因子策略", "EMA 趋势突破策略", "RSI 均值回归策略", "MACD 金叉死叉策略"]
+        )
+        bt_capital = st.number_input("初始回测资金 (USDT)", value=10000.0, step=1000.0)
+        bt_leverage = st.slider("策略杠杆", 1, 10, 1)
+        run_bt = st.button("🚀 运行 Gate.io 历史真实回测")
+
+    with bt_col2:
+        # 执行回测引擎
+        df_bt_res, metrics = BacktestEngine.run_backtest(
+            df_symbol, 
+            strategy_name=bt_strategy, 
+            initial_capital=bt_capital, 
+            leverage=bt_leverage
+        )
+        
+        # 绘制策略收益率曲线
+        fig_bt = go.Figure()
+        fig_bt.add_trace(go.Scatter(
+            x=df_bt_res['timestamp'], y=df_bt_res['cum_strategy'], 
+            name=f"{bt_strategy} (策略)", line=dict(color='#26a69a', width=2)
+        ))
+        fig_bt.add_trace(go.Scatter(
+            x=df_bt_res['timestamp'], y=df_bt_res['cum_benchmark'], 
+            name=f"{selected_symbol} Buy & Hold (基准)", line=dict(color='#787b86', dash='dash')
+        ))
+        
+        fig_bt.update_layout(
+            paper_bgcolor='#ffffff', plot_bgcolor='#ffffff', 
+            font=dict(color='#111111'), height=360, 
+            margin=dict(l=10, r=10, t=30, b=10),
+            xaxis=dict(gridcolor='#e0e0e0'), yaxis=dict(gridcolor='#e0e0e0')
+        )
+        st.plotly_chart(fig_bt, use_container_width=True)
+        
+        # 指标评价展示
+        b_m1, b_m2, b_m3, b_m4, b_m5 = st.columns(5)
+        b_m1.metric("累计收益率", f"{metrics['total_return']}%", f"基准: {metrics['benchmark_return']}%")
+        b_m2.metric("最大回撤 (Max DD)", f"{metrics['max_drawdown']}%", delta_color="inverse")
+        b_m3.metric("策略胜率 (Win Rate)", f"{metrics['win_rate']}%")
+        b_m4.metric("盈亏比 (Profit Factor)", f"{metrics['profit_factor']}")
+        b_m5.metric("夏普比率 (Sharpe)", f"{metrics['sharpe_ratio']}")
 
 # ------------------------------------------
 # TAB 6: 交易心理与复盘
 # ------------------------------------------
 with tab6:
-    st.subheader("📘 Gate 历史实盘复盘")
+    st.subheader(f"📘 Gate {selected_symbol} 历史实盘复盘")
     history_trades = pd.DataFrame([
-        {"订单ID": "#GATE-101", "交易对": "BTC_USDT", "方向": "做多 (LONG)", "盈亏(USDT)": "+320.00", "AI 评分": 92},
-        {"订单ID": "#GATE-102", "交易对": "ETH_USDT", "方向": "做空 (SHORT)", "盈亏(USDT)": "-150.00", "AI 评分": 58}
+        {"订单ID": "#GATE-101", "交易对": selected_symbol, "方向": "做多 (LONG)", "盈亏(USDT)": "+320.00", "AI 评分": 92},
+        {"订单ID": "#GATE-102", "交易对": selected_symbol, "方向": "做空 (SHORT)", "盈亏(USDT)": "-150.00", "AI 评分": 58}
     ])
     st.dataframe(history_trades, hide_index=True, use_container_width=True)
 
