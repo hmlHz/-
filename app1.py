@@ -77,11 +77,11 @@ def fetch_market_data(symbol="BTC/USDT", timeframe="1h", limit=100):
         "low": low, "close": close, "volume": volume
     })
     
-    # 特征计算 (Feature Engine)
+    # 特征计算 (Feature Engine) - 已修复 Pandas 2.x+ 兼容性
     df['EMA20'] = df['close'].ewm(span=20, adjust=False).mean()
     df['EMA60'] = df['close'].ewm(span=60, adjust=False).mean()
     df['RSI'] = 50 + np.sin(np.linspace(0, 10, limit)) * 25
-    df['ATR'] = (df['high'] - df['low']).rolling(14).mean().fillna(method='bfill')
+    df['ATR'] = (df['high'] - df['low']).rolling(14).mean().bfill()
     
     return df
 
