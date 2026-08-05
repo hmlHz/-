@@ -17,7 +17,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 注入基础全局样式 (全白背景，黑字)
+# 注入 CSS
 st.markdown("""
 <style>
     .stApp, [data-testid="stAppViewContainer"] {
@@ -93,7 +93,7 @@ st.markdown("""
 
 @st.cache_data(ttl=2)
 def fetch_gate_futures_data(symbol="BTC_USDT", interval="1h", limit=100):
-    """从 Gate.io 获取真实永续合约 OHLCV 及技术指标"""
+    """从 Gate.io 获取真实永续合约 OHLCV 及精细化技术指标"""
     gate_contract = symbol.replace("/", "_")
     url = "https://fx-api.gateio.ws/api/v4/futures/usdt/candlesticks"
     params = {"contract": gate_contract, "interval": interval, "limit": limit}
@@ -109,8 +109,8 @@ def fetch_gate_futures_data(symbol="BTC_USDT", interval="1h", limit=100):
                 df['high'] = pd.to_numeric(df['h'], errors='coerce')
                 df['low'] = pd.to_numeric(df['l'], errors='coerce')
                 df['close'] = pd.to_numeric(df['c'], errors='coerce')
-                df['volume'] = pd.to_numeric(df['v'], errors='coerce')
-                df = df.dropna().reset_index(drop=True)
+                df['volume'] = pd.to_numeric(df['v'], errors='coerce').fillna(0)
+                df = df.dropna(subset=['close']).reset_index(drop=True)
                 
                 # 指标计算
                 df['EMA20'] = df['close'].ewm(span=20, adjust=False).mean()
@@ -129,8 +129,11 @@ def fetch_gate_futures_data(symbol="BTC_USDT", interval="1h", limit=100):
                 df['RSI'] = df['RSI'].fillna(50)
                 
                 df['ATR'] = (df['high'] - df['low']).rolling(14).mean().bfill()
-                df['Vol_MA20'] = df['volume'].rolling(20).mean().bfill()
-                df['Vol_Ratio'] = df['volume'] / (df['Vol_MA20'] + 1e-8)
+                
+                # 修复放量计算：使用 min_periods=1 保证前20根柱子也能算精准放量倍数
+                vol_ma20 = df['volume'].rolling(20, min_periods=1).mean()
+                df['Vol_Ratio'] = np.where(vol_ma20 > 0, df['volume'] / vol_ma20, 1.0)
+                df['Vol_Ratio'] = df['Vol_Ratio'].round(2)
                 
                 return df, True
     except Exception:
@@ -150,7 +153,7 @@ def fetch_gate_futures_data(symbol="BTC_USDT", interval="1h", limit=100):
     df['MACD_Signal'] = 5.0
     df['RSI'] = 55.0
     df['ATR'] = 200.0
-    df['Vol_Ratio'] = 1.2
+    df['Vol_Ratio'] = 1.15
     return df, False
 
 @st.cache_data(ttl=5)
@@ -167,7 +170,7 @@ def fetch_gate_contract_info(symbol="BTC_USDT"):
         return 0.0001, 0.0
 
 class PrecisionAIDecisionEngine:
-    """精细化 AI 量化决策模型"""
+    """中文精细化 AI 量化决策模型"""
     @staticmethod
     def evaluate_market(df, funding_rate=0.0001):
         latest = df.iloc[-1]
@@ -204,23 +207,28 @@ class PrecisionAIDecisionEngine:
         tech_score = max(0, min(100, tech_score))
         trend_score = 85 if (close > ema20 > ema60) else (15 if (close < ema20 < ema60) else 50)
         flow_score = 75 if 0 < funding_rate <= 0.0003 else (30 if funding_rate < 0 else 40)
-        vol_score = 85 if vol_ratio >= 1.3 else 50
+        vol_score = 85 if vol_ratio >= 1.2 else 50
         
         total_score = round(tech_score * 0.40 + trend_score * 0.30 + flow_score * 0.15 + vol_score * 0.15, 1)
         
+        # 中文方向映射与逻辑说明
         if total_score >= 62:
-            direction = "LONG"
-            decision_desc = f"看多：价格稳居 EMA20 (${ema20:.1f}) 上方，MACD 指标偏强，放量 {vol_ratio:.1f} 倍。"
+            direction_zh = "做多 (LONG)"
+            direction_code = "LONG"
+            decision_desc = f"看多：价格稳居 EMA20 (${ema20:,.1f}) 上方，MACD 多头动能增强，成交量达到均量的 {vol_ratio:.2f} 倍。"
         elif total_score <= 38:
-            direction = "SHORT"
-            decision_desc = f"看空：价格处于 EMA20 (${ema20:.1f}) 下方，空头承压。"
+            direction_zh = "做空 (SHORT)"
+            direction_code = "SHORT"
+            decision_desc = f"看空：价格处于 EMA20 (${ema20:,.1f}) 下方，空头承压，成交量为均量的 {vol_ratio:.2f} 倍。"
         else:
-            direction = "WAIT"
-            decision_desc = f"观望：处于盘整区间，等待突破信号。"
+            direction_zh = "观望 (WAIT)"
+            direction_code = "WAIT"
+            decision_desc = f"观望：价格在 EMA20 (${ema20:,.1f}) 附近整理，成交交投平稳 ({vol_ratio:.2f} 倍均量)。"
             
         return {
             "total_score": total_score,
-            "direction": direction,
+            "direction_zh": direction_zh,
+            "direction_code": direction_code,
             "decision_desc": decision_desc,
             "confidence": round(abs(total_score - 50) * 2, 1),
             "tech_score": int(tech_score),
@@ -286,11 +294,12 @@ btc_eval = PrecisionAIDecisionEngine.evaluate_market(df_btc, funding_rate)
 
 curr_price_val = btc_eval['current_price']
 score_val = btc_eval['total_score']
-dir_val = btc_eval['direction']
+dir_zh_val = btc_eval['direction_zh']
+dir_code_val = btc_eval['direction_code']
 
 col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
 col_m1.metric("Gate BTC/USDT 最新价", f"${curr_price_val:,.2f}", f"标记价: ${mark_price:,.1f}")
-col_m2.metric("AI 综合评分", f"{score_val} / 100", f"方向: {dir_val}")
+col_m2.metric("AI 综合评分", f"{score_val} / 100", f"方向: {dir_zh_val}")
 col_m3.metric("Gate 资金费率", f"{funding_rate*100:.4f}%", "实时" if is_live else "模拟")
 col_m4.metric("API 接入状态", "Gate.io Official", "连接正常" if is_live else "网络异常")
 col_m5.metric("全网持仓 (OI)", "$18.5B", "+2.1%")
@@ -358,28 +367,28 @@ with tab1:
         })
         st.dataframe(scores_df, hide_index=True, use_container_width=True)
         
-        st.info(f"💡 **Gate 行情结论**:\n\nGate 实时价格: **${curr_price_val:,.2f}**\n\n当前 AI 评分: **{score_val} 分**\n\n最终信号方向: **{dir_val}**\n\n**分析依据**: {btc_eval['decision_desc']}")
+        st.info(f"💡 **Gate 行情结论**:\n\nGate 实时价格: **${curr_price_val:,.2f}**\n\n当前 AI 评分: **{score_val} 分**\n\n最终信号方向: **{dir_zh_val}**\n\n**分析依据**: {btc_eval['decision_desc']}")
 
 # ------------------------------------------
-# TAB 2: AI 交易信号中心 (使用原生 Streamlit 容器，避免 React DOM 崩溃)
+# TAB 2: AI 交易信号中心
 # ------------------------------------------
 with tab2:
     st.subheader("🎯 Gate.io 合约高概率交易信号")
     current_p = btc_eval['current_price']
     atr = btc_eval['atr']
     
-    if dir_val == "LONG":
+    if dir_code_val == "LONG":
         sl_price = current_p - 1.5 * atr
         tp1_price = current_p + 2.0 * atr
-        st.success(f"🟢 **信号指令: LONG (做多) Gate.io BTC_USDT** | 现价: ${current_p:,.2f} | 评分: {score_val} 分 | 置信度: {btc_eval['confidence']}%")
-    elif dir_val == "SHORT":
+        st.success(f"🟢 **信号指令: {dir_zh_val} Gate.io BTC_USDT** | 现价: ${current_p:,.2f} | 评分: {score_val} 分 | 置信度: {btc_eval['confidence']}%")
+    elif dir_code_val == "SHORT":
         sl_price = current_p + 1.5 * atr
         tp1_price = current_p - 2.0 * atr
-        st.error(f"🔴 **信号指令: SHORT (做空) Gate.io BTC_USDT** | 现价: ${current_p:,.2f} | 评分: {score_val} 分 | 置信度: {btc_eval['confidence']}%")
+        st.error(f"🔴 **信号指令: {dir_zh_val} Gate.io BTC_USDT** | 现价: ${current_p:,.2f} | 评分: {score_val} 分 | 置信度: {btc_eval['confidence']}%")
     else:
         sl_price = current_p * 0.98
         tp1_price = current_p * 1.02
-        st.warning(f"🟡 **信号指令: WAIT (观望整理) Gate.io BTC_USDT** | 现价: ${current_p:,.2f} | 评分: {score_val} 分 | 置信度: {btc_eval['confidence']}%")
+        st.warning(f"🟡 **信号指令: {dir_zh_val} Gate.io BTC_USDT** | 现价: ${current_p:,.2f} | 评分: {score_val} 分 | 置信度: {btc_eval['confidence']}%")
         
     st.write("")
     s_col1, s_col2, s_col3 = st.columns(3)
@@ -390,7 +399,7 @@ with tab2:
     st.subheader("🤖 GPT 智能逻辑分析")
     st.write(f"- {btc_eval['decision_desc']}")
     st.write(f"- **RSI 动能**: 当前 RSI(14) 为 `{btc_eval['rsi']}`")
-    st.write(f"- **放量确认**: 20周期成交放量倍数为 `{btc_eval['vol_ratio']}x`")
+    st.write(f"- **放量确认**: 20周期成交放大倍数为 `{btc_eval['vol_ratio']}x`")
     
     if st.button("🚀 执行此信号 (自动推送至 Gate.io API)"):
         st.success("✅ 订单已通过风控检测，成功提交至 Gate.io 合约撮合引擎！单号: #GATE-20241025-0012")
@@ -411,8 +420,9 @@ with tab3:
             "Gate 合约": sym,
             "真实价格": f"${eval_temp['current_price']:,.2f}",
             "AI 评分": eval_temp['total_score'],
-            "建议方向": eval_temp['direction'],
+            "建议方向": eval_temp['direction_zh'],
             "RSI 动能": eval_temp['rsi'],
+            "成交放量": f"{eval_temp['vol_ratio']}x",
             "资金费率": f"{f_rate*100:.4f}%"
         })
         
@@ -456,8 +466,8 @@ with tab5:
 with tab6:
     st.subheader("📘 Gate 历史实盘复盘")
     history_trades = pd.DataFrame([
-        {"订单ID": "#GATE-101", "交易对": "BTC_USDT", "方向": "LONG", "盈亏(USDT)": "+320.00", "AI 评分": 92},
-        {"订单ID": "#GATE-102", "交易对": "ETH_USDT", "方向": "SHORT", "盈亏(USDT)": "-150.00", "AI 评分": 58}
+        {"订单ID": "#GATE-101", "交易对": "BTC_USDT", "方向": "做多 (LONG)", "盈亏(USDT)": "+320.00", "AI 评分": 92},
+        {"订单ID": "#GATE-102", "交易对": "ETH_USDT", "方向": "做空 (SHORT)", "盈亏(USDT)": "-150.00", "AI 评分": 58}
     ])
     st.dataframe(history_trades, hide_index=True, use_container_width=True)
 
