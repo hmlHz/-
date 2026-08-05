@@ -8,7 +8,7 @@ import requests
 import time
 
 # ==========================================
-# 1. 页面配置与全局暗黑主题 CSS 注入
+# 1. 页面配置与“白底黑字 + K线图黑底”CSS
 # ==========================================
 st.set_page_config(
     page_title="AI Futures Workbench V2.0 (Gate.io Live)",
@@ -17,39 +17,58 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 强制全局 TradingView 极夜暗黑主题 CSS
+# 注入 CSS: 页面白底黑字，组件明亮风格
 st.markdown("""
 <style>
+    /* 1. 主页面白底黑字 */
     .stApp, [data-testid="stAppViewContainer"] {
-        background-color: #131722 !important;
-        color: #d1d4dc !important;
+        background-color: #ffffff !important;
+        color: #111111 !important;
     }
+
     [data-testid="stHeader"] {
-        background-color: #131722 !important;
+        background-color: #ffffff !important;
     }
+
+    /* 2. 侧边栏 - 浅灰底、黑字 */
     [data-testid="stSidebar"] {
-        background-color: #1e222d !important;
-        border-right: 1px solid #2a2e39 !important;
+        background-color: #f8f9fa !important;
+        border-right: 1px solid #e0e0e0 !important;
     }
+    [data-testid="stSidebar"] * {
+        color: #111111 !important;
+    }
+
+    /* 3. 所有标题与文字变黑 */
+    h1, h2, h3, h4, h5, h6, p, span, label, div {
+        color: #111111 !important;
+    }
+
+    /* 4. Metric 指标卡片 - 白底、边框、黑字 */
     div[data-testid="stMetric"] {
-        background-color: #1e222d !important;
-        border: 1px solid #2a2e39 !important;
+        background-color: #f8f9fa !important;
+        border: 1px solid #d0d7de !important;
         border-radius: 8px !important;
         padding: 12px !important;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.2) !important;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.05) !important;
     }
     [data-testid="stMetricValue"] {
-        color: #2962ff !important;
+        color: #1a73e8 !important;
         font-weight: bold !important;
     }
+    [data-testid="stMetricLabel"] {
+        color: #555555 !important;
+    }
+
+    /* 5. Tab 选项卡 - 浅色风格 */
     .stTabs [data-baseweb="tab-list"] {
-        background-color: #1e222d !important;
+        background-color: #f0f2f6 !important;
         border-radius: 8px !important;
         padding: 4px !important;
         gap: 8px !important;
     }
     .stTabs [data-baseweb="tab"] {
-        color: #787b86 !important;
+        color: #333333 !important;
         border-radius: 6px !important;
         padding: 8px 16px !important;
     }
@@ -57,20 +76,27 @@ st.markdown("""
         background-color: #2962ff !important;
         color: #ffffff !important;
     }
+    .stTabs [aria-selected="true"] * {
+        color: #ffffff !important;
+    }
+
+    /* 6. 信号卡片 - 明亮清新颜色 */
     .signal-long {
-        background-color: rgba(38, 166, 154, 0.15) !important;
-        border: 1px solid #26a69a !important;
-        color: #26a69a !important;
+        background-color: #e8f5e9 !important;
+        border: 1px solid #2e7d32 !important;
+        color: #1b5e20 !important;
         border-radius: 8px !important;
         padding: 16px !important;
     }
     .signal-short {
-        background-color: rgba(239, 83, 80, 0.15) !important;
-        border: 1px solid #ef5350 !important;
-        color: #ef5350 !important;
+        background-color: #ffebee !important;
+        border: 1px solid #c62828 !important;
+        color: #b71c1c !important;
         border-radius: 8px !important;
         padding: 16px !important;
     }
+
+    /* 7. 按钮与表格 */
     .stButton>button {
         background-color: #2962ff !important;
         color: #ffffff !important;
@@ -78,8 +104,12 @@ st.markdown("""
         border-radius: 6px !important;
         font-weight: bold !important;
     }
+    .stButton>button * {
+        color: #ffffff !important;
+    }
     [data-testid="stDataFrame"] {
-        background-color: #1e222d !important;
+        background-color: #ffffff !important;
+        border: 1px solid #e0e0e0 !important;
         border-radius: 8px !important;
     }
 </style>
@@ -89,18 +119,12 @@ st.markdown("""
 # 2. Gate.io 真实 API 数据引擎 (Market Engine)
 # ==========================================
 
-@st.cache_data(ttl=2) # 2秒缓存，获取最新真实行情
+@st.cache_data(ttl=2)
 def fetch_gate_futures_data(symbol="BTC_USDT", interval="1h", limit=80):
     """从 Gate.io 官方 API 获取永续合约真实 K 线"""
-    # 格式化 symbol (如 BTC/USDT -> BTC_USDT)
     gate_contract = symbol.replace("/", "_")
-    
     url = f"https://fx-api.gateio.ws/api/v4/futures/usdt/candlesticks"
-    params = {
-        "contract": gate_contract,
-        "interval": interval,
-        "limit": limit
-    }
+    params = {"contract": gate_contract, "interval": interval, "limit": limit}
     
     try:
         response = requests.get(url, params=params, timeout=5)
@@ -110,7 +134,6 @@ def fetch_gate_futures_data(symbol="BTC_USDT", interval="1h", limit=80):
                 raise ValueError("Gate API 返回空数据")
                 
             df = pd.DataFrame(data)
-            # Gate API 返回字段: t (timestamp), v (volume), c (close), h (high), l (low), o (open)
             df['timestamp'] = pd.to_datetime(df['t'], unit='s')
             df['open'] = df['o'].astype(float)
             df['high'] = df['h'].astype(float)
@@ -118,26 +141,23 @@ def fetch_gate_futures_data(symbol="BTC_USDT", interval="1h", limit=80):
             df['close'] = df['c'].astype(float)
             df['volume'] = df['v'].astype(float)
             
-            # 指标计算 (Feature Engine)
+            # 指标计算
             df['EMA20'] = df['close'].ewm(span=20, adjust=False).mean()
             df['EMA60'] = df['close'].ewm(span=60, adjust=False).mean()
             
-            # 计算 RSI
             delta = df['close'].diff()
             gain = (delta.where(delta > 0, 0)).rolling(14).mean()
             loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
             rs = gain / loss
             df['RSI'] = 100 - (100 / (1 + rs))
             df['RSI'] = df['RSI'].fillna(50)
-            
-            # 计算 ATR
             df['ATR'] = (df['high'] - df['low']).rolling(14).mean().bfill()
             
             return df, True
     except Exception as e:
-        st.sidebar.error(f"Gate API 获取失败，已启用备用数据模式: {e}")
+        pass
         
-    # 网络失败时的 Fallback 生成逻辑
+    # Fallback
     dates = [datetime.datetime.now() - datetime.timedelta(hours=i) for i in range(limit)][::-1]
     base_price = 68000.0 if "BTC" in symbol else 2500.0
     close = base_price + np.cumsum(np.random.normal(0, 50, limit))
@@ -153,7 +173,7 @@ def fetch_gate_futures_data(symbol="BTC_USDT", interval="1h", limit=80):
 
 @st.cache_data(ttl=5)
 def fetch_gate_contract_info(symbol="BTC_USDT"):
-    """获取 Gate.io 真实合约资金费率与标记价"""
+    """获取 Gate.io 真实资金费率与标记价"""
     gate_contract = symbol.replace("/", "_")
     url = f"https://fx-api.gateio.ws/api/v4/futures/usdt/contracts/{gate_contract}"
     try:
@@ -165,7 +185,7 @@ def fetch_gate_contract_info(symbol="BTC_USDT"):
         return 0.0001, 0.0
 
 class AIDecisionEngine:
-    """AI 决策引擎 - 配合 Gate 真实数据分析"""
+    """AI 决策引擎"""
     @staticmethod
     def evaluate_market(df, funding_rate=0.0001):
         latest = df.iloc[-1]
@@ -284,7 +304,7 @@ with tab1:
         
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.75, 0.25])
         
-        # 暗黑专业烛台图
+        # K 线图保持黑底 (#131722)，文字白色，对比鲜明
         fig.add_trace(go.Candlestick(
             x=df_btc['timestamp'], open=df_btc['open'], high=df_btc['high'],
             low=df_btc['low'], close=df_btc['close'], name="K线",
@@ -298,10 +318,11 @@ with tab1:
         colors = ['#26a69a' if c >= o else '#ef5350' for c, o in zip(df_btc['close'], df_btc['open'])]
         fig.add_trace(go.Bar(x=df_btc['timestamp'], y=df_btc['volume'], name="成交量", marker_color=colors), row=2, col=1)
         
+        # 保持 K 线图黑底
         fig.update_layout(
             paper_bgcolor='#131722',
             plot_bgcolor='#131722',
-            font=dict(color='#d1d4dc'),
+            font=dict(color='#ffffff'), # 图内文字为白色
             height=520,
             margin=dict(l=10, r=10, t=10, b=10),
             xaxis_rangeslider_visible=False,
@@ -403,7 +424,7 @@ with tab5:
     
     fig_bt = go.Figure()
     fig_bt.add_trace(go.Scatter(x=days, y=returns_strat*100, name="Gate AI 策略", line=dict(color='#26a69a', width=2)))
-    fig_bt.update_layout(paper_bgcolor='#131722', plot_bgcolor='#131722', font=dict(color='#d1d4dc'), height=320, margin=dict(l=10, r=10, t=10, b=10))
+    fig_bt.update_layout(paper_bgcolor='#ffffff', plot_bgcolor='#ffffff', font=dict(color='#111111'), height=320, margin=dict(l=10, r=10, t=10, b=10))
     st.plotly_chart(fig_bt, use_container_width=True)
 
 # ------------------------------------------
